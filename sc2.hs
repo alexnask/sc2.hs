@@ -30,10 +30,11 @@ data Replay = Replay { players :: [Player]
 data BlizzStruct = ArrayData [BlizzStruct] | StringData ByteString | HashMapData [(Int, BlizzStruct)] | IntData Int | Unknown
                   deriving(Show)
 
-fromOctets :: [Word8] -> Word32
-fromOctets = Prelude.foldl accum 0
-    where
-        accum a o = (a `shiftL` 8) .|. fromIntegral o
+word :: [Word8] -> Word32
+word (a:b:c:d:[]) = (fromIntegral a `shiftL` 24)
+            .|. (fromIntegral b `shiftL` 16)
+            .|. (fromIntegral c `shiftL`  8)
+            .|. (fromIntegral d            )
 
 readDataStruct :: ByteString -> BlizzStruct
 readDataStruct dat = fst $ readDataStruct' dat 0
@@ -57,7 +58,7 @@ readDataStruct' dat offset =
     else if flag == 0x06 then
         (IntData $ fromIntegral $ head $ take 1 (drop (offset + 1) dat), offset + 2)
     else if flag == 0x07 then
-        (IntData $ fromIntegral $ fromOctets $ Data.ByteString.unpack $ take 4 (drop (offset + 1) dat), offset + 5)
+        (IntData $ fromIntegral $ word $ Data.ByteString.unpack $ take 4 (drop (offset + 1) dat), offset + 5)
     else if flag == 0x09 then
         let (num, off) = variableInt dat (offset + 1) in
         (IntData num, off)
