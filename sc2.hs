@@ -7,6 +7,9 @@ import Data.ByteString
 import Data.Bits
 import Prelude hiding (take, drop, head)
 import Data.ByteString.Char8 hiding (head, take, drop)
+import Data.Word
+
+import System.IO.Unsafe
 
 data Player = Player { name     :: ByteString
                       , race     :: ByteString
@@ -24,42 +27,36 @@ data Replay = Replay { players :: [Player]
                       } deriving (Show)
 
 data BlizzStruct = ArrayData [BlizzStruct] | StringData ByteString | HashMapData [(Int, BlizzStruct)] | IntData Int | Unknown
-                    deriving (Show)
+                  deriving(Show)
+
+fromOctets :: [Word8] -> Word32
+fromOctets = Prelude.foldl accum 0
+    where
+        accum a o = (a `shiftL` 8) .|. fromIntegral o
 
 readDataStruct :: ByteString -> BlizzStruct
 readDataStruct dat = fst $ readDataStruct' dat 0
 
 -- Well, this is a giant mess :p
 -- See https://github.com/GraylinKim/sc2reader/blob/master/sc2reader/utils.py => read_data_struct
+
 readDataStruct' :: ByteString -> Int -> (BlizzStruct, Int)
 readDataStruct' dat offset =
-    if flag == 0x00 then
-        let (nentries, off) = variableInt dat (offset + 1)
-            (entries, finaloff) = getN dat nentries off in
-        (ArrayData entries, finaloff) 
-    else if flag == 0x01 then
-        let (nentries, off) = variableInt dat (offset + 3)
-            (entries, finaloff) = getN dat nentries off in
-        (ArrayData entries, finaloff)
-    else if flag == 0x02 then
-        let length = head $ take 1 (drop (offset + 1) dat) in
-        (StringData $ take (fromIntegral $ length `quot` 2) (drop (offset + 2) dat), offset + 2 + (fromIntegral length))
-    else if flag == 0x03 then
-        readDataStruct' dat (offset + 2)
+    if flag == 0x02 then
+        let (length, off) = variableInt dat (offset + 1) in
+        (StringData $ take length (drop off dat), off + length)
     else if flag == 0x04 then
-        let switch = head $ take 1 (drop (offset + 1) dat) in
-        if switch /= 0 then
-            readDataStruct' dat (offset + 2)
-        else
-            (IntData 0, offset + 2)
+        let (nelements, off) = variableInt dat (offset + 3)
+            (elements, noff) = getN dat nelements off in
+            (ArrayData elements, noff)
     else if flag == 0x05 then
-        let nentries = head $ take 1 (drop (offset + 1) dat)
-            (entries, off) = getNkeys dat (fromIntegral $ nentries `quot` 2) (offset + 2) in
-        (HashMapData entries, off)
+        let (nentries, off) = variableInt dat (offset + 1)
+            (entries, noff) = getNkeys dat nentries off in
+        (HashMapData entries, noff)
     else if flag == 0x06 then
         (IntData $ fromIntegral $ head $ take 1 (drop (offset + 1) dat), offset + 2)
     else if flag == 0x07 then
-        (StringData $ take 4 (drop (offset + 1) dat), offset + 5)
+        (IntData $ fromIntegral $ fromOctets $ Data.ByteString.unpack $ take 4 (drop (offset + 1) dat), offset + 5)
     else if flag == 0x09 then
         let (num, off) = variableInt dat (offset + 1) in
         (IntData num, off)
@@ -74,17 +71,20 @@ readDataStruct' dat offset =
 
           getNkeys :: ByteString -> Int -> Int -> ([(Int, BlizzStruct)], Int)
           getNkeys _ 0 off = ([], off)
-          getNkeys dat n off = let key = head $ take 1 (drop off dat)
-                                   (firstStruct, firstOff) = readDataStruct' dat (off + 1)
+          getNkeys dat n off = let (key, offset) = variableInt dat off
+                                   (firstStruct, firstOff) = readDataStruct' dat offset
                                    (restStructs, restOff) = getNkeys dat (n - 1) firstOff in
-                               ((fromIntegral $ key `quot` 2, firstStruct) : restStructs, restOff)
+                               ((key, firstStruct) : restStructs, restOff)
 
           variableInt :: ByteString -> Int -> (Int, Int)
           variableInt dat off = variableInt' dat (off + 1) (fromIntegral $ head $ take 1 (drop off dat)) 0 0
-                                where variableInt' :: ByteString -> Int -> Int -> Int -> Int -> (Int, Int)
-                                      variableInt' dat off byte val bit_shift = if (byte .&. 0x80) /= 0 then (value, off)
-                                                                                else variableInt' dat (off + 1) (fromIntegral $ head $ take 1 (drop off dat)) value (bit_shift + 7)
-                                                                              where value = ((- 1) ^ (val .&. 0x1)) * (val `shiftR` 1)
+                              where variableInt' :: ByteString -> Int -> Int -> Int -> Int -> (Int, Int)
+                                    variableInt' dat off byte val i = if testBit byte 0 then
+                                                                        let value = (byte .&. 0x7F) `shiftL` (7 * i) in
+                                                                        variableInt' dat (off + 1) (fromIntegral $ head $ take 1 (drop off dat)) value (i + 1)
+                                                                    else
+                                                                        let value = byte `shiftL` (7 * i) in
+                                                                        ((- 1) ^ (value .&. 0x1) * (value `shiftR` 1), off)
 
 loadReplay :: ByteString -> IO Replay
 loadReplay path = do
@@ -118,7 +118,7 @@ loadReplay path = do
                                                  take 2 (drop (off + 6) dat)
                                              else
                                                  "Unknown"
-                  
+
 
 {- Test code -}
 test :: String -> IO ()
