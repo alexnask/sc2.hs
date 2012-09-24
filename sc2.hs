@@ -17,7 +17,8 @@ data Player = Player { name     :: ByteString
                       , handicap :: Int
                       , win      :: Bool
                       , color    :: (Int, Int, Int, Int) -- rgba
-                      } deriving (Show)
+                      }
+             | Observer { name   :: ByteString } deriving (Show)
 
 data Replay = Replay { players :: [Player]
                       , region  :: ByteString
@@ -79,12 +80,12 @@ readDataStruct' dat offset =
           variableInt :: ByteString -> Int -> (Int, Int)
           variableInt dat off = variableInt' dat (off + 1) (fromIntegral $ head $ take 1 (drop off dat)) 0 0
                               where variableInt' :: ByteString -> Int -> Int -> Int -> Int -> (Int, Int)
-                                    variableInt' dat off byte val i = if testBit byte 0 then
-                                                                        let value = (byte .&. 0x7F) `shiftL` (7 * i) in
+                                    variableInt' dat off byte val i = if (byte .&. 0x80) > 0 then
+                                                                        let value = val + ((byte .&. 0x7F) `shiftL` (7 * i)) in
                                                                         variableInt' dat (off + 1) (fromIntegral $ head $ take 1 (drop off dat)) value (i + 1)
                                                                     else
-                                                                        let value = byte `shiftL` (7 * i) in
-                                                                        ((- 1) ^ (value .&. 0x1) * (value `shiftR` 1), off)
+                                                                        let value = val + (byte `shiftL` (7 * i)) in
+                                                                        (((- 1) ^ (value .&. 0x1)) * (value `shiftR` 1), off)
 
 loadReplay :: ByteString -> IO Replay
 loadReplay path = do
