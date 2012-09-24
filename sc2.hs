@@ -106,17 +106,17 @@ loadReplay path = do
                           realm = getRealm init (offset + 33 + (fromIntegral accountLength) + 686)
                           -- Finished parsing replay.initData
                           -- Lets parse replay.details!
+                          -- This file is a serialized blizzard data structure. This is how it looks like deserialized: https://github.com/GraylinKim/sc2reader/wiki/replay.details
                           Just numDetails = fileNumber archive "replay.details"
                           Just details = fileContents archive (fromIntegral numDetails)
                           struct = readDataStruct details
-                          (players, map, date) = getInfo struct
-                      print names
-                      print account
-                      print realm
-                      print players
-                      print map
-                      print date
-                      return $ Replay [] realm map (Data.ByteString.Char8.pack date) account
+                          (activeplayers, map, date) = getInfo struct
+                          -- Finished parsing replay.details
+                          -- replay.initData gave us a list of all players, replay.details gave as a list of players active, so we can deduce the observers from those two :D
+                          observers = Prelude.map Observer (Prelude.filter (\x -> (not $ Prelude.any (\p -> (name p) == x) activeplayers) && x /= "") names)
+                      -- Let's close that archive
+                      closeArchive archive
+                      return $ Replay (activeplayers ++ observers) realm map (Data.ByteString.Char8.pack date) account
                       where
                           getNames _ 0 off = ([], off)
                           getNames dat num off = let len = head $ take 1 (drop off dat)
@@ -130,12 +130,21 @@ loadReplay path = do
                                                             StringData map = snd $ pairs !! 1
                                                             IntData timestamp = snd $ pairs !! 5
                                                             (year, month, day) = toGregorian $ utctDay $ posixSecondsToUTCTime $ realToFrac (((realToFrac timestamp) - 116444735995904000)/10000000) in
-                                                            (playerArray, map, (show day) ++ "/" ++ (show month) ++ "/" ++ (show year))
-
-
-{- Test code -}
-test :: String -> IO ()
-test file = do
-                rep <- loadReplay $ Data.ByteString.Char8.pack file
-                return ()
+                                                            (toPlayers playerArray, map, (show day) ++ "/" ++ (show month) ++ "/" ++ (show year))
+                                                        where toPlayers :: [BlizzStruct] -> [Player]
+                                                              toPlayers [] = []
+                                                              toPlayers ((HashMapData player):rest) =
+                                                                                                    let StringData name = snd $ player !! 0
+                                                                                                        StringData race = snd $ player !! 2
+                                                                                                        IntData team = snd $ player !! 5
+                                                                                                        IntData handicap = snd $ player !! 6
+                                                                                                        IntData win = snd $ player !! 8
+                                                                                                        HashMapData colorData = snd $ player !! 3 in
+                                                                                                    (Player name race (team + 1) (100 - handicap) (win == 1) (colorTuple colorData)) : (toPlayers rest)
+                                                                                                    where colorTuple :: [(Int, BlizzStruct)] -> (Int, Int, Int, Int)
+                                                                                                          colorTuple dat = let IntData alpha = snd $ dat !! 0
+                                                                                                                               IntData red = snd $ dat !! 1
+                                                                                                                               IntData green = snd $ dat !! 2
+                                                                                                                               IntData blue = snd $ dat !! 3 in
+                                                                                                                           (red, green, blue, alpha)
 
