@@ -4,6 +4,7 @@ module Sc2 where
 
 import MPQ
 import Data.ByteString
+import Data.Bits
 import Prelude hiding (take, drop, head)
 import Data.ByteString.Char8 hiding (head, take, drop)
 
@@ -12,6 +13,7 @@ data Player = Player { name     :: ByteString
                       , team     :: Int
                       , handicap :: Int
                       , win      :: Bool
+                      , color    :: (Int, Int, Int, Int) -- rgba
                       } deriving (Show)
 
 data Replay = Replay { players :: [Player]
@@ -21,24 +23,92 @@ data Replay = Replay { players :: [Player]
                       , account :: ByteString
                       } deriving (Show)
 
-openReplay :: ByteString -> IO Replay
-openReplay path = do
+data BlizzStruct = ArrayData [BlizzStruct] | StringData ByteString | HashMapData [(Int, BlizzStruct)] | IntData Int | Unknown
+                    deriving (Show)
+
+readDataStruct :: ByteString -> BlizzStruct
+readDataStruct dat = fst $ readDataStruct' dat 0
+
+-- Well, this is a giant mess :p
+-- See https://github.com/GraylinKim/sc2reader/blob/master/sc2reader/utils.py => read_data_struct
+readDataStruct' :: ByteString -> Int -> (BlizzStruct, Int)
+readDataStruct' dat offset =
+    if flag == 0x00 then
+        let (nentries, off) = variableInt dat (offset + 1)
+            (entries, finaloff) = getN dat nentries off in
+        (ArrayData entries, finaloff) 
+    else if flag == 0x01 then
+        let (nentries, off) = variableInt dat (offset + 3)
+            (entries, finaloff) = getN dat nentries off in
+        (ArrayData entries, finaloff)
+    else if flag == 0x02 then
+        let length = head $ take 1 (drop (offset + 1) dat) in
+        (StringData $ take (fromIntegral $ length `quot` 2) (drop (offset + 2) dat), offset + 2 + (fromIntegral length))
+    else if flag == 0x03 then
+        readDataStruct' dat (offset + 2)
+    else if flag == 0x04 then
+        let switch = head $ take 1 (drop (offset + 1) dat) in
+        if switch /= 0 then
+            readDataStruct' dat (offset + 2)
+        else
+            (IntData 0, offset + 2)
+    else if flag == 0x05 then
+        let nentries = head $ take 1 (drop (offset + 1) dat)
+            (entries, off) = getNkeys dat (fromIntegral $ nentries `quot` 2) (offset + 2) in
+        (HashMapData entries, off)
+    else if flag == 0x06 then
+        (IntData $ fromIntegral $ head $ take 1 (drop (offset + 1) dat), offset + 2)
+    else if flag == 0x07 then
+        (StringData $ take 4 (drop (offset + 1) dat), offset + 5)
+    else if flag == 0x09 then
+        let (num, off) = variableInt dat (offset + 1) in
+        (IntData num, off)
+    else (Unknown, offset)
+
+    where flag = head $ take 1 (drop offset dat)
+          getN :: ByteString -> Int -> Int -> ([BlizzStruct], Int)
+          getN _ 0 off = ([], off)
+          getN dat n off = let (firstStruct, firstOff) = readDataStruct' dat off
+                               (restStructs, restOff) = getN dat (n - 1) firstOff in
+                           (firstStruct : restStructs, restOff)
+
+          getNkeys :: ByteString -> Int -> Int -> ([(Int, BlizzStruct)], Int)
+          getNkeys _ 0 off = ([], off)
+          getNkeys dat n off = let key = head $ take 1 (drop off dat)
+                                   (firstStruct, firstOff) = readDataStruct' dat (off + 1)
+                                   (restStructs, restOff) = getNkeys dat (n - 1) firstOff in
+                               ((fromIntegral $ key `quot` 2, firstStruct) : restStructs, restOff)
+
+          variableInt :: ByteString -> Int -> (Int, Int)
+          variableInt dat off = variableInt' dat (off + 1) (fromIntegral $ head $ take 1 (drop off dat)) 0 0
+                                where variableInt' :: ByteString -> Int -> Int -> Int -> Int -> (Int, Int)
+                                      variableInt' dat off byte val bit_shift = if (byte .&. 0x80) /= 0 then (value, off)
+                                                                                else variableInt' dat (off + 1) (fromIntegral $ head $ take 1 (drop off dat)) value (bit_shift + 7)
+                                                                              where value = ((- 1) ^ (val .&. 0x1)) * (val `shiftR` 1)
+
+loadReplay :: ByteString -> IO Replay
+loadReplay path = do
                       let Left archive = openArchive path
                           -- Parse replay.initData: See https://github.com/GraylinKim/sc2reader/wiki/replay.initData for info on the magic happening here
-                          Just num = fileNumber archive "replay.initData"
-                          Just dat = fileContents archive (fromIntegral num) 
-                          playerNum = head $ take 1 dat
-                          (names, offset) = getNames dat playerNum 1
+                          Just numInit = fileNumber archive "replay.initData"
+                          Just init = fileContents archive (fromIntegral numInit) 
+                          playerNum = head $ take 1 init
+                          (names, offset) = getNames init playerNum 1
                           -- I had a little bit of trouble here. The docs say there are 24 bytes of unknown data, I found out that in patch 1.5 replays there are actually 32 bytes
-                          accountLength = head $ take 1 (drop (offset + 33) dat)
-                          account = take (fromIntegral accountLength) (drop (offset + 34) dat)
+                          accountLength = head $ take 1 (drop (offset + 33) init)
+                          account = take (fromIntegral accountLength) (drop (offset + 34) init)
                            -- Also, the docs indicate we have 684 bytes of padding after the account string while I found out there are 686 bytes
-                          realm = getRealm dat (offset + 33 + (fromIntegral accountLength) + 686)
+                          realm = getRealm init (offset + 33 + (fromIntegral accountLength) + 686)
                           -- Finished parsing replay.initData
+                          -- Lets parse replay.details!
+                          Just numDetails = fileNumber archive "replay.details"
+                          Just details = fileContents archive (fromIntegral numDetails)
+                          struct = readDataStruct details
                       print names
                       print account
                       print realm
-                      return $ Replay [] "" "" "" account
+                      print struct
+                      return $ Replay [] realm "" "" account
                       where
                           getNames _ 0 off = ([], off)
                           getNames dat num off = let len = head $ take 1 (drop off dat)
@@ -53,6 +123,6 @@ openReplay path = do
 {- Test code -}
 test :: String -> IO ()
 test file = do
-                rep <- openReplay $ Data.ByteString.Char8.pack file
+                rep <- loadReplay $ Data.ByteString.Char8.pack file
                 return ()
 
