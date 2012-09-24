@@ -8,8 +8,9 @@ import Data.Bits
 import Prelude hiding (take, drop, head)
 import Data.ByteString.Char8 hiding (head, take, drop)
 import Data.Word
-
-import System.IO.Unsafe
+import Data.Time.Clock
+import Data.Time.Calendar
+import Data.Time.Clock.POSIX
 
 data Player = Player { name     :: ByteString
                       , race     :: ByteString
@@ -48,9 +49,11 @@ readDataStruct' dat offset =
         let (length, off) = variableInt dat (offset + 1) in
         (StringData $ take length (drop off dat), off + length)
     else if flag == 0x04 then
-        let (nelements, off) = variableInt dat (offset + 3)
-            (elements, noff) = getN dat nelements off in
-            (ArrayData elements, noff)
+        if ((head $ take 1 (drop (offset + 1) dat)) == 1) && ((head $ take 1 (drop (offset + 2) dat)) == 0) then
+            let (nelements, off) = variableInt dat (offset + 3)
+                (elements, noff) = getN dat nelements off in
+                (ArrayData elements, noff)
+        else (Unknown, offset + 1)
     else if flag == 0x05 then
         let (nentries, off) = variableInt dat (offset + 1)
             (entries, noff) = getNkeys dat nentries off in
@@ -106,11 +109,14 @@ loadReplay path = do
                           Just numDetails = fileNumber archive "replay.details"
                           Just details = fileContents archive (fromIntegral numDetails)
                           struct = readDataStruct details
+                          (players, map, date) = getInfo struct
                       print names
                       print account
                       print realm
-                      print struct
-                      return $ Replay [] realm "" "" account
+                      print players
+                      print map
+                      print date
+                      return $ Replay [] realm map (Data.ByteString.Char8.pack date) account
                       where
                           getNames _ 0 off = ([], off)
                           getNames dat num off = let len = head $ take 1 (drop off dat)
@@ -120,6 +126,11 @@ loadReplay path = do
                                                  take 2 (drop (off + 6) dat)
                                              else
                                                  "Unknown"
+                          getInfo (HashMapData pairs) = let ArrayData playerArray = snd $ pairs !! 0
+                                                            StringData map = snd $ pairs !! 1
+                                                            IntData timestamp = snd $ pairs !! 5
+                                                            (year, month, day) = toGregorian $ utctDay $ posixSecondsToUTCTime $ realToFrac (((realToFrac timestamp) - 116444735995904000)/10000000) in
+                                                            (playerArray, map, (show day) ++ "/" ++ (show month) ++ "/" ++ (show year))
 
 
 {- Test code -}
